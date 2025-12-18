@@ -1,186 +1,259 @@
-import fetch from 'node-fetch';
-import * as cheerio from 'cheerio';
-import { JobSource } from './base';
-import { NormalizedJob } from '../types/job';
-import { logger } from '../utils/logger';
+import puppeteer, { Browser, Page } from "puppeteer-core";
+import chromium from "@sparticuz/chromium";
+import { JobSource } from "./base";
+import { NormalizedJob } from "../types/job";
+import { logger } from "../utils/logger";
 
 /**
  * Wuzzuf scraping adapter
- * Note: This is a lightweight scraper. Respect robots.txt and rate limits.
+ * Uses Puppeteer to handle React SPA dynamic content
  */
 export class WuzzufSource implements JobSource {
-  readonly name = 'wuzzuf';
-  private readonly baseUrl = 'https://wuzzuf.net';
+  readonly name = "wuzzuf";
+  private readonly baseUrl = "https://wuzzuf.net";
 
   async fetchJobs(since: Date): Promise<NormalizedJob[]> {
+    let browser: Browser | null = null;
+
     try {
-      logger.info(`Fetching jobs from ${this.name} since ${since.toISOString()}`);
-      
+      logger.info(
+        `Fetching jobs from ${this.name} since ${since.toISOString()}`
+      );
+
       // Wuzzuf search URL for remote/backend jobs
-      const searchUrl = `${this.baseUrl}/search/jobs?q=backend+remote&filters[country][]=Egypt`;
-      
-      const response = await fetch(searchUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        },
+      const searchUrl = `${this.baseUrl}/search/jobs?q=${encodeURIComponent(
+        process.env.JOB_QUERY_KEYWORDS!.split(",").join("+")
+      )}+remote&filters[country][]=Egypt`;
+
+      // Launch browser with serverless-optimized settings
+      browser = await this.launchBrowser();
+      const page = await browser.newPage();
+
+      // Set viewport and user agent
+      await page.setViewport({ width: 1920, height: 1080 });
+      await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+      );
+
+      logger.info(`Navigating to ${searchUrl}`);
+      await page.goto(searchUrl, {
+        waitUntil: "networkidle2",
+        timeout: 30000,
       });
 
-      if (!response.ok) {
-        throw new Error(`Wuzzuf returned ${response.status}`);
+      // Wait for the React app to render job listings
+      // Try multiple selectors that might indicate jobs are loaded
+      logger.info("Waiting for job listings to load...");
+      
+      try {
+        // Wait for any job-related element to appear
+        await page.waitForSelector(
+          'a[href*="/jobs/"], [data-testid*="job"], article, .css-1gatmva',
+          { timeout: 15000 }
+        );
+      } catch (error) {
+        logger.warn("Timeout waiting for job selectors, proceeding anyway");
       }
 
-      const html = await response.text();
-      const $ = cheerio.load(html);
-      
-      const normalizedJobs: NormalizedJob[] = [];
-      
-      // Debug: Log HTML length and try to find job containers
-      logger.info(`HTML received: ${html.length} characters`);
-      
-      // Try multiple selector strategies for job listings
-      // Wuzzuf uses various class names, try common patterns
-      const jobSelectors = [
-        '[data-testid*="job"]',
-        '.css-1gatmva',
-        '.css-1gatmva-e',
-        'article[class*="job"]',
-        'div[class*="job-card"]',
-        'div[class*="JobCard"]',
-        'a[href*="/jobs/"]',
-        '.css-1gatmva-e1qvo2ff0',
-      ];
-      
-      let jobElements: ReturnType<typeof $> | null = null;
-      let usedSelector = '';
-      
-      for (const selector of jobSelectors) {
-        const elements = $(selector);
-        if (elements.length > 0) {
-          jobElements = elements;
-          usedSelector = selector;
-          logger.info(`Found ${elements.length} job elements using selector: ${selector}`);
-          break;
-        }
-      }
-      
-      if (!jobElements || jobElements.length === 0) {
-        // Fallback: try to find any links that look like job links
-        const jobLinks = $('a[href*="/jobs/"]').not('a[href*="/search"]');
-        logger.warn(`No job containers found. Found ${jobLinks.length} potential job links. Trying alternative approach...`);
-        
-        // Try to find parent containers of job links
-        jobLinks.slice(0, 20).each((_idx: number, linkElement: any) => {
-          try {
-            const $link = $(linkElement);
-            const $container = $link.closest('div, article, li');
-            
-            if ($container.length === 0) return;
-            
-            const title = $link.text().trim() || $link.find('h2, h3, .title').first().text().trim();
-            const url = $link.attr('href') || '';
-            const fullUrl = url.startsWith('http') ? url : `${this.baseUrl}${url}`;
-            
-            // Try to find company name in nearby elements
-            const company = $container.find('[class*="company"], [class*="Company"]').first().text().trim() 
-              || $container.text().split('\n').find((line: string) => line.trim().length > 0 && !line.includes(title))?.trim() 
-              || 'Unknown Company';
-            
-            const location = $container.find('[class*="location"], [class*="Location"]').first().text().trim() || 'Egypt';
-            
-            // Try to find date
-            const postedText = $container.find('[class*="date"], [class*="time"], [class*="posted"]').first().text().trim();
-            const postedAt = this.parseDate(postedText, new Date()); // Use current date as fallback to avoid filtering
-            
-            if (!title || title.length < 3) {
-              return;
-            }
-            
-            // Only include jobs posted after the 'since' date
-            if (postedAt < since) {
-              logger.debug(`Skipping job "${title}" - posted at ${postedAt.toISOString()}, since ${since.toISOString()}`);
-              return;
-            }
-            
-            const normalized: NormalizedJob = {
-              title,
-              company: company || 'Unknown Company',
-              location: location || 'Egypt',
-              platform: this.name,
-              url: fullUrl,
-              postedAt,
-              seniority: this.extractSeniority(title),
-              employmentType: 'full-time',
-            };
-            
-            normalizedJobs.push(normalized);
-          } catch (error) {
-            logger.warn(`Failed to normalize job from ${this.name} (fallback)`, { error });
-          }
-        });
-      } else {
-        // Use the found selector
-        jobElements.each((_idx: number, element: any) => {
-          try {
-            const $job = $(element);
-            
-            // Try multiple strategies to find title
-            const title = $job.find('h2 a, h3 a, a[href*="/jobs/"]').first().text().trim()
-              || $job.find('h2, h3, [class*="title"], [class*="Title"]').first().text().trim();
-            
-            // Try multiple strategies to find company
-            const company = $job.find('[class*="company"], [class*="Company"], .css-17s97q8').first().text().trim();
-            
-            // Try multiple strategies to find location
-            const location = $job.find('[class*="location"], [class*="Location"], .css-5wys0k').first().text().trim() || 'Egypt';
-            
-            // Try multiple strategies to find URL
-            const url = $job.find('h2 a, h3 a, a[href*="/jobs/"]').first().attr('href') || '';
-            const fullUrl = url.startsWith('http') ? url : url ? `${this.baseUrl}${url}` : '';
-            
-            // Try to extract posted date from the job card
-            const postedText = $job.find('[class*="date"], [class*="time"], [class*="posted"], .css-4x4xq').first().text().trim();
-            const postedAt = this.parseDate(postedText, new Date()); // Use current date as fallback
-            
-            if (!title || title.length < 3) {
-              logger.debug(`Skipping job - missing title. Company: ${company}`);
-              return;
-            }
-            
-            if (!company || company.length < 2) {
-              logger.debug(`Skipping job "${title}" - missing company`);
-              return;
-            }
-            
-            // Only include jobs posted after the 'since' date
-            if (postedAt < since) {
-              logger.debug(`Skipping job "${title}" - posted at ${postedAt.toISOString()}, since ${since.toISOString()}`);
-              return;
-            }
-            
-            const normalized: NormalizedJob = {
-              title,
-              company,
-              location: location || 'Egypt',
-              platform: this.name,
-              url: fullUrl,
-              postedAt,
-              seniority: this.extractSeniority(title),
-              employmentType: 'full-time',
-            };
-            
-            normalizedJobs.push(normalized);
-          } catch (error) {
-            logger.warn(`Failed to normalize job from ${this.name}`, { error });
-          }
-        });
-      }
+      // Give additional time for React to fully render
+      await page.waitForTimeout(2000);
 
-      logger.info(`Fetched ${normalizedJobs.length} jobs from ${this.name} (used selector: ${usedSelector || 'fallback'})`);
+      // Extract job data from the rendered page
+      const normalizedJobs = await this.extractJobsFromPage(page, since);
+
+      logger.info(
+        `Fetched ${normalizedJobs.length} jobs from ${this.name}`
+      );
+
       return normalizedJobs;
     } catch (error) {
       logger.error(`Error fetching jobs from ${this.name}`, error);
       throw error;
+    } finally {
+      if (browser) {
+        await browser.close();
+      }
     }
+  }
+
+  private async launchBrowser(): Promise<Browser> {
+    // Check if we're in a serverless environment (Vercel)
+    const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
+
+    if (isServerless) {
+      // Use serverless-optimized Chromium
+      return await puppeteer.launch({
+        args: chromium.args,
+        defaultViewport: chromium.defaultViewport,
+        executablePath: await chromium.executablePath(),
+        headless: chromium.headless,
+        ignoreHTTPSErrors: true,
+      });
+    } else {
+      // Local development - use system Chrome/Chromium
+      return await puppeteer.launch({
+        headless: true,
+        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      });
+    }
+  }
+
+  private async extractJobsFromPage(
+    page: Page,
+    since: Date
+  ): Promise<NormalizedJob[]> {
+    const normalizedJobs: NormalizedJob[] = [];
+
+    // Try multiple strategies to find job listings
+    // Note: page.evaluate runs in browser context where DOM types are available
+    const extractedJobs = await page.evaluate(() => {
+      interface JobInfo {
+        title: string;
+        company: string;
+        location: string;
+        url: string;
+        postedText: string;
+      }
+
+      const jobs: JobInfo[] = [];
+
+      // Strategy 1: Find all links to job detail pages
+      const allLinks = Array.from(
+        document.querySelectorAll<HTMLAnchorElement>('a[href*="/jobs/"]')
+      );
+      const jobLinks = allLinks.filter((link) => {
+        const href = link.getAttribute("href") || "";
+        return href.includes("/jobs/") && !href.includes("/search");
+      });
+
+      for (const link of jobLinks.slice(0, 50)) {
+        // Skip if we've already processed this job
+        const href = link.getAttribute("href") || "";
+        if (jobs.some((j) => j.url === href)) continue;
+
+        // Find the parent container (job card)
+        let container: Element | null = link;
+        for (let i = 0; i < 5; i++) {
+          container = container?.parentElement || null;
+          if (!container) break;
+
+          // Check if this looks like a job card container
+          const hasJobIndicators =
+            container.querySelector('[class*="company"]') ||
+            container.querySelector('[class*="Company"]') ||
+            container.querySelector('[class*="location"]') ||
+            container.querySelector('[class*="Location"]');
+
+          if (hasJobIndicators) break;
+        }
+
+        if (!container) continue;
+
+        // Extract title
+        const titleElement = link.querySelector("h2, h3, .title") as HTMLElement | null;
+        const title =
+          link.textContent?.trim() ||
+          titleElement?.textContent?.trim() ||
+          "";
+
+        if (!title || title.length < 3) continue;
+
+        // Extract company
+        const companyElement =
+          (container.querySelector('[class*="company"]') as HTMLElement) ||
+          (container.querySelector('[class*="Company"]') as HTMLElement) ||
+          Array.from(container.querySelectorAll("*")).find((el) => {
+            const element = el as HTMLElement;
+            return element.className?.toLowerCase().includes("company");
+          }) as HTMLElement | undefined;
+        const company =
+          companyElement?.textContent?.trim() ||
+          (container.querySelectorAll("*").item(1) as HTMLElement)
+            ?.textContent?.trim()
+            .split("\n")[0] ||
+          "Unknown Company";
+
+        // Extract location
+        const locationElement =
+          (container.querySelector('[class*="location"]') as HTMLElement) ||
+          (container.querySelector('[class*="Location"]') as HTMLElement) ||
+          Array.from(container.querySelectorAll("*")).find((el) => {
+            const element = el as HTMLElement;
+            return element.className?.toLowerCase().includes("location");
+          }) as HTMLElement | undefined;
+        const location =
+          locationElement?.textContent?.trim() || "Egypt";
+
+        // Extract posted date
+        const dateElement =
+          (container.querySelector('[class*="date"]') as HTMLElement) ||
+          (container.querySelector('[class*="time"]') as HTMLElement) ||
+          (container.querySelector('[class*="posted"]') as HTMLElement) ||
+          Array.from(container.querySelectorAll("*")).find((el) => {
+            const element = el as HTMLElement;
+            const text = element.textContent?.toLowerCase() || "";
+            return (
+              text.includes("ago") ||
+              text.includes("منذ") ||
+              text.includes("today") ||
+              text.includes("اليوم")
+            );
+          }) as HTMLElement | undefined;
+        const postedText = dateElement?.textContent?.trim() || "";
+
+        // Build full URL
+        const url = href.startsWith("http") ? href : `https://wuzzuf.net${href}`;
+
+        jobs.push({
+          title,
+          company: company.substring(0, 100), // Limit length
+          location: location.substring(0, 100),
+          url,
+          postedText,
+        });
+      }
+
+      return jobs;
+    });
+
+    // Normalize and filter jobs
+    for (const jobInfo of extractedJobs) {
+      try {
+        const postedAt = this.parseDate(jobInfo.postedText, new Date());
+
+        // Only include jobs posted after the 'since' date
+        if (postedAt < since) {
+          logger.debug(
+            `Skipping job "${jobInfo.title}" - posted at ${postedAt.toISOString()}, since ${since.toISOString()}`
+          );
+          continue;
+        }
+
+        if (!jobInfo.title || jobInfo.title.length < 3) {
+          continue;
+        }
+
+        const normalized: NormalizedJob = {
+          title: jobInfo.title,
+          company: jobInfo.company || "Unknown Company",
+          location: jobInfo.location || "Egypt",
+          platform: this.name,
+          url: jobInfo.url,
+          postedAt,
+          seniority: this.extractSeniority(jobInfo.title),
+          employmentType: "full-time",
+        };
+
+        normalizedJobs.push(normalized);
+      } catch (error) {
+        logger.warn(`Failed to normalize job from ${this.name}`, {
+          error,
+          jobInfo,
+        });
+      }
+    }
+
+    return normalizedJobs;
   }
 
   private parseDate(dateText: string, _fallback: Date): Date {
@@ -192,10 +265,10 @@ export class WuzzufSource implements JobSource {
     const lower = dateText.toLowerCase();
     const now = new Date();
 
-    if (lower.includes('today') || lower.includes('اليوم')) {
+    if (lower.includes("today") || lower.includes("اليوم")) {
       return now;
     }
-    if (lower.includes('yesterday') || lower.includes('أمس')) {
+    if (lower.includes("yesterday") || lower.includes("أمس")) {
       const yesterday = new Date(now);
       yesterday.setDate(yesterday.getDate() - 1);
       return yesterday;
@@ -233,10 +306,10 @@ export class WuzzufSource implements JobSource {
 
   private extractSeniority(title: string): string | undefined {
     const lowerTitle = title.toLowerCase();
-    if (lowerTitle.includes('senior')) return 'senior';
-    if (lowerTitle.includes('junior')) return 'junior';
-    if (lowerTitle.includes('mid') || lowerTitle.includes('middle')) return 'mid';
+    if (lowerTitle.includes("senior")) return "senior";
+    if (lowerTitle.includes("junior")) return "junior";
+    if (lowerTitle.includes("mid") || lowerTitle.includes("middle"))
+      return "mid";
     return undefined;
   }
 }
-
