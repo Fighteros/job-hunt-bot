@@ -9,9 +9,19 @@ export function getPool(): Pool {
       throw new Error('DATABASE_URL environment variable is not set');
     }
 
+    // Determine SSL configuration
+    // For production environments (Vercel, etc.), always use SSL with rejectUnauthorized: false
+    // to handle self-signed certificates from managed database providers
+    const isProduction = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1';
+    const sslConfig = isProduction 
+      ? { rejectUnauthorized: false }
+      : process.env.DATABASE_SSL === 'true' 
+        ? { rejectUnauthorized: false }
+        : false;
+
     pool = new Pool({
       connectionString: databaseUrl,
-      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+      ssl: sslConfig,
     });
 
     pool.on('error', (err) => {
