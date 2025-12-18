@@ -1,14 +1,12 @@
-import { readFileSync } from 'fs';
-import { join } from 'path';
-import { existsSync } from 'fs';
-import { getPool } from '../db/client';
-import { logger } from '../utils/logger';
+import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { getPool } from '../src/db/client';
+import { logger } from '../src/utils/logger';
 
 /**
- * Database schema - embedded for reliability
- * This ensures the migration works even if schema.sql isn't copied to dist/
+ * Database schema - embedded for serverless compatibility
+ * This matches the schema in src/db/schema.sql
  */
-const EMBEDDED_SCHEMA = `
+const SCHEMA_SQL = `
 -- Jobs Table
 -- Stores normalized jobs with global deduplication via hash primary key
 CREATE TABLE IF NOT EXISTS jobs (
@@ -56,45 +54,46 @@ CREATE INDEX IF NOT EXISTS idx_user_job_notifications_job_hash ON user_job_notif
 `;
 
 /**
- * Database migration script
+ * Database migration API endpoint
  * Runs the schema to set up the database tables
+ * Secured with CRON_SECRET or MIGRATION_SECRET
  */
-async function migrate() {
+export default async function handler(
+  req: VercelRequest,
+  res: VercelResponse
+): Promise<void> {
+  // Verify this is an authorized request
+  const authHeader = req.headers.authorization;
+  const cronSecret = process.env.CRON_SECRET;
+  const migrationSecret = process.env.MIGRATION_SECRET;
+  const expectedSecret = migrationSecret || cronSecret;
+  
+  if (expectedSecret && authHeader !== `Bearer ${expectedSecret}`) {
+    logger.warn('Unauthorized migration request', { authHeader: authHeader ? 'present' : 'missing' });
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
   try {
     logger.info('Starting database migration...');
 
-    // Try to read from schema.sql file first (for development)
-    // Fall back to embedded schema if file not found
-    let schema = EMBEDDED_SCHEMA;
-    
-    // In CommonJS (which this project uses), __dirname is available
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const currentDir = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
-    
-    const possiblePaths = [
-      join(currentDir, '../db/schema.sql'), // dist/db/schema.sql
-      join(currentDir, '../../src/db/schema.sql'), // src/db/schema.sql (from dist/scripts/)
-      join(process.cwd(), 'src/db/schema.sql'), // src/db/schema.sql (from project root)
-    ];
-
-    for (const path of possiblePaths) {
-      if (existsSync(path)) {
-        logger.info(`Reading schema from file: ${path}`);
-        schema = readFileSync(path, 'utf-8');
-        break;
-      }
-    }
-
+    // Execute migration
     const pool = getPool();
-    await pool.query(schema);
+    await pool.query(SCHEMA_SQL);
 
     logger.info('Database migration completed successfully');
-    process.exit(0);
+
+    res.status(200).json({
+      success: true,
+      message: 'Database migration completed successfully',
+    });
   } catch (error) {
     logger.error('Database migration failed', error);
-    process.exit(1);
+    
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
   }
 }
-
-migrate();
 
