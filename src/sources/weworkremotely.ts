@@ -15,7 +15,7 @@ export class WeWorkRemotelySource implements JobSource {
   constructor() {
     this.parser = new Parser({
       customFields: {
-        item: ['pubDate'],
+        item: ['pubDate', 'region', 'category'],
       },
     });
   }
@@ -26,28 +26,61 @@ export class WeWorkRemotelySource implements JobSource {
       
       const feed = await this.parser.parseURL(this.rssUrl);
       
+      logger.info(`RSS feed parsed, found ${feed.items?.length || 0} items`);
+      
       const normalizedJobs: NormalizedJob[] = [];
 
       for (const item of feed.items || []) {
         try {
+          if (!item.title || !item.link) {
+            logger.warn(`Skipping item with missing title or link`, { 
+              hasTitle: !!item.title,
+              hasLink: !!item.link 
+            });
+            continue;
+          }
+
           const postedAt = item.pubDate ? new Date(item.pubDate) : new Date();
+          
+          // Validate date
+          if (isNaN(postedAt.getTime())) {
+            logger.warn(`Invalid date for item: ${item.title}`, { pubDate: item.pubDate });
+            continue;
+          }
           
           // Only include jobs posted after the 'since' date
           if (postedAt < since) {
             continue;
           }
 
-          // Parse title format: "Job Title - Company Name"
-          const titleMatch = item.title?.match(/^(.+?)\s*-\s*(.+)$/);
-          const title = titleMatch ? titleMatch[1].trim() : (item.title || 'Untitled');
-          const company = titleMatch ? titleMatch[2].trim() : 'Unknown Company';
+          // Parse title format: "Company Name: Job Title" (colon format)
+          // Also handle "Job Title - Company Name" (dash format) as fallback
+          let title: string;
+          let company: string;
+          
+          const colonMatch = item.title.match(/^(.+?):\s*(.+)$/);
+          const dashMatch = item.title.match(/^(.+?)\s*-\s*(.+)$/);
+          
+          if (colonMatch) {
+            // Format: "Company: Job Title"
+            company = colonMatch[1].trim();
+            title = colonMatch[2].trim();
+          } else if (dashMatch) {
+            // Format: "Job Title - Company Name" (fallback)
+            title = dashMatch[1].trim();
+            company = dashMatch[2].trim();
+          } else {
+            // No separator found, use entire title as job title
+            title = item.title.trim();
+            company = 'Unknown Company';
+          }
 
           const normalized: NormalizedJob = {
             title,
             company,
             location: 'Remote',
             platform: this.name,
-            url: item.link || '',
+            url: item.link,
             postedAt,
             seniority: this.extractSeniority(title),
             employmentType: 'full-time',
@@ -55,11 +88,15 @@ export class WeWorkRemotelySource implements JobSource {
 
           normalizedJobs.push(normalized);
         } catch (error) {
-          logger.warn(`Failed to normalize job from ${this.name}`, { error, item });
+          logger.warn(`Failed to normalize job from ${this.name}`, { 
+            error: error instanceof Error ? error.message : String(error),
+            title: item.title,
+            link: item.link 
+          });
         }
       }
 
-      logger.info(`Fetched ${normalizedJobs.length} jobs from ${this.name}`);
+      logger.info(`Fetched ${normalizedJobs.length} jobs from ${this.name} (from ${feed.items?.length || 0} total items)`);
       return normalizedJobs;
     } catch (error) {
       logger.error(`Error fetching jobs from ${this.name}`, error);
