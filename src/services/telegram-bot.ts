@@ -38,7 +38,8 @@ export class TelegramBotService {
         });
       });
 
-      const welcomeMessage = `Hi! 👋
+      const welcomeMessage = `
+👋 Welcome to Daily Job Hunt Bot!
 
 I'll send you daily job notifications based on your preferences.
 
