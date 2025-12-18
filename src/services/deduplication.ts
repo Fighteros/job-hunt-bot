@@ -1,4 +1,4 @@
-import { NormalizedJob, JobWithHash } from '../types/job';
+import { NormalizedJob } from '../types/job';
 import { generateJobHash } from '../utils/hash';
 import { JobsRepository } from '../db/jobs';
 import { withTransaction } from '../db/client';
