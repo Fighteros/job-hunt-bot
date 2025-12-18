@@ -22,17 +22,44 @@ export class RemoteOKSource implements JobSource {
 
       const data = await response.json() as Array<Record<string, unknown>>;
       
-      // Filter out the first element if it's metadata
-      const jobs = Array.isArray(data) ? data.filter(item => item.id) : [];
+      if (!Array.isArray(data)) {
+        logger.warn(`RemoteOK API returned non-array data: ${typeof data}`);
+        return [];
+      }
+      
+      // Filter out metadata objects (those without 'id' field) and get valid job objects
+      const jobs = data.filter(item => {
+        // Check if it's a valid job object (has id and position/company)
+        return item.id && (item.position || item.company);
+      });
+      
+      logger.info(`RemoteOK API returned ${data.length} items, ${jobs.length} valid jobs`);
       
       const normalizedJobs: NormalizedJob[] = [];
+      let skippedBeforeSince = 0;
+      let skippedInvalidDate = 0;
 
       for (const job of jobs) {
         try {
-          const postedAt = new Date(job.date as string);
+          // Parse the date - RemoteOK uses ISO date strings
+          const dateStr = job.date as string;
+          if (!dateStr) {
+            logger.warn(`Job missing date field, skipping`, { jobId: job.id });
+            continue;
+          }
+          
+          const postedAt = new Date(dateStr);
+          
+          // Check if date is valid
+          if (isNaN(postedAt.getTime())) {
+            skippedInvalidDate++;
+            logger.warn(`Invalid date format for job, skipping`, { jobId: job.id, date: dateStr });
+            continue;
+          }
           
           // Only include jobs posted after the 'since' date
           if (postedAt < since) {
+            skippedBeforeSince++;
             continue;
           }
 
@@ -41,7 +68,7 @@ export class RemoteOKSource implements JobSource {
             company: String(job.company || 'Unknown Company'),
             location: String(job.location || 'Remote'),
             platform: this.name,
-            url: String(job.url || `https://remoteok.io/remote-jobs/${job.id}`),
+            url: String(job.url || job.apply_url || `https://remoteok.io/remote-jobs/${job.id}`),
             postedAt,
             seniority: this.extractSeniority(String(job.position || '')),
             techStack: this.extractTechStack(job),
@@ -50,11 +77,16 @@ export class RemoteOKSource implements JobSource {
 
           normalizedJobs.push(normalized);
         } catch (error) {
-          logger.warn(`Failed to normalize job from ${this.name}`, { error, job });
+          logger.warn(`Failed to normalize job from ${this.name}`, { error, jobId: job.id });
         }
       }
 
-      logger.info(`Fetched ${normalizedJobs.length} jobs from ${this.name}`);
+      logger.info(`Fetched ${normalizedJobs.length} jobs from ${this.name}`, {
+        totalJobs: jobs.length,
+        skippedBeforeSince,
+        skippedInvalidDate,
+        sinceDate: since.toISOString(),
+      });
       return normalizedJobs;
     } catch (error) {
       logger.error(`Error fetching jobs from ${this.name}`, error);
