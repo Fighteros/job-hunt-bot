@@ -54,7 +54,7 @@ export default async function handler(
     logger.info(`Fetched ${jobs.length} jobs total`, { stats });
 
     // Step 2: Deduplicate and store jobs
-    const { stored, duplicates, storedHashes } = await deduplicationEngine.deduplicateAndStore(jobs);
+    const { stored, duplicates } = await deduplicationEngine.deduplicateAndStore(jobs);
     logger.info(`Stored ${stored} new jobs, ${duplicates} duplicates`);
 
     // Step 3: Get all users
