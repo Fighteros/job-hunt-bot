@@ -9,35 +9,27 @@ export function getPool(): Pool {
       throw new Error('DATABASE_URL environment variable is not set');
     }
 
-    // Detect if this is a Neon database connection
-    // Neon connection strings typically contain 'neon.tech' or 'neon' in the hostname
-    const isNeon = databaseUrl.includes('neon.tech') || databaseUrl.includes('@neon') || 
-                   databaseUrl.includes('neon-db') || databaseUrl.includes('neontech');
-    
-    // Detect production/serverless environments (Vercel, Lambda, etc.)
+    // Detect production/serverless environments
+    // In production: ALWAYS force SSL (no exceptions, no parsing, no guessing)
     const isProduction = 
       process.env.NODE_ENV === 'production' || 
       process.env.VERCEL === '1' ||
       process.env.VERCEL_ENV === 'production' ||
       !!process.env.VERCEL_URL ||
       !!process.env.AWS_LAMBDA_FUNCTION_NAME;
+
+    // SSL configuration: deterministic and safe
+    // Production/serverless: ALWAYS use SSL (managed DBs require it)
+    // Development: use SSL by default, allow explicit override via DATABASE_SSL=false
+    let sslConfig: boolean | { rejectUnauthorized: boolean };
     
-    // Configure SSL for Neon and other managed database providers
-    // Neon requires SSL and uses self-signed certificates, so we need rejectUnauthorized: false
-    let sslConfig: boolean | { rejectUnauthorized: boolean } = false;
-    
-    // Check if SSL is explicitly disabled in connection string
-    const sslExplicitlyDisabled = databaseUrl.includes('sslmode=disable');
-    
-    if (sslExplicitlyDisabled) {
-      sslConfig = false;
-    } else if (isNeon || isProduction) {
-      // Neon and most managed DB providers (Vercel Postgres, Supabase, Railway, etc.)
-      // require SSL with rejectUnauthorized: false to handle self-signed certificates
+    if (isProduction) {
+      // Production: force SSL always (no exceptions)
       sslConfig = { rejectUnauthorized: false };
-    } else if (process.env.DATABASE_SSL === 'true') {
-      // Development: use SSL if explicitly enabled
-      sslConfig = { rejectUnauthorized: false };
+    } else {
+      // Development: default to SSL, allow explicit disable
+      const sslDisabled = process.env.DATABASE_SSL === 'false';
+      sslConfig = sslDisabled ? false : { rejectUnauthorized: false };
     }
 
     pool = new Pool({
