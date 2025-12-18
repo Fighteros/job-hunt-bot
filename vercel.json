@@ -6,7 +6,7 @@
     }
   ],
   "functions": {
-    "src/api/**/*.ts": {
+    "api/**/*.ts": {
       "maxDuration": 30
     }
   }
