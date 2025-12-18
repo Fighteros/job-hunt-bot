@@ -25,6 +25,7 @@ export function getPool(): Pool {
     
     if (isProduction) {
       // Production: force SSL always (no exceptions)
+      // rejectUnauthorized: false allows self-signed certificates (common in managed DBs like Neon, Supabase, etc.)
       sslConfig = { rejectUnauthorized: false };
     } else {
       // Development: default to SSL, allow explicit disable
@@ -32,9 +33,31 @@ export function getPool(): Pool {
       sslConfig = sslDisabled ? false : { rejectUnauthorized: false };
     }
 
+    // Parse and clean connection string to remove SSL-related query params
+    // This ensures our explicit SSL config takes precedence
+    // Neon and other managed DBs often include sslmode=require which can conflict
+    let cleanConnectionString = databaseUrl;
+    try {
+      // URL constructor works with postgresql:// scheme
+      const url = new URL(databaseUrl);
+      // Remove SSL-related query parameters that might conflict with our config
+      const sslParams = ['sslmode', 'ssl', 'sslcert', 'sslkey', 'sslrootcert', 'sslcrl'];
+      sslParams.forEach(param => url.searchParams.delete(param));
+      cleanConnectionString = url.toString();
+    } catch (e) {
+      // If URL parsing fails, use original connection string
+      // This can happen with non-standard connection string formats
+      // In this case, the explicit ssl config should still override connection string params
+    }
+
     pool = new Pool({
-      connectionString: databaseUrl,
+      connectionString: cleanConnectionString,
+      // Explicitly set SSL config - this will override any SSL params in connectionString
       ssl: sslConfig,
+      // Connection pool settings for better reliability
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
     });
 
     pool.on('error', (err) => {
