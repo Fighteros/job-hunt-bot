@@ -34,6 +34,22 @@ export default async function handler(
     // Load configuration
     const config = loadConfig();
 
+    // Log configuration for debugging
+    logger.info('Configuration loaded', {
+      enabledSources: {
+        remoteok: config.enableRemoteOK,
+        wwr: config.enableWWR,
+        wuzzuf: config.enableWuzzuf,
+        linkedin: config.enableLinkedIn,
+      },
+      lookbackHours: config.jobFetchLookbackHours,
+      queryKeywords: config.jobQueryKeywords,
+      excludedKeywords: config.jobExcludedKeywords,
+      locations: config.jobLocations,
+      seniority: config.jobSeniority,
+      maxJobsPerSource: config.maxJobsPerSource,
+    });
+
     // Calculate lookback window
     const since = new Date();
     since.setHours(since.getHours() - config.jobFetchLookbackHours);
@@ -42,6 +58,26 @@ export default async function handler(
 
     // Initialize services
     const sources = createJobSources(config);
+    logger.info(`Initialized ${sources.length} job source(s)`, {
+      sourceNames: sources.map(s => s.name),
+    });
+
+    if (sources.length === 0) {
+      logger.warn('No job sources enabled! Check ENABLE_REMOTEOK, ENABLE_WWR, ENABLE_WUZZUF environment variables');
+      res.status(200).json({
+        success: true,
+        warning: 'No job sources enabled',
+        stats: {
+          jobsFetched: 0,
+          jobsStored: 0,
+          duplicates: 0,
+          notificationsSent: 0,
+          duration: `${Date.now() - startTime}ms`,
+        },
+      });
+      return;
+    }
+
     const jobFetcher = new JobFetcherService(sources, config);
     const jobsRepo = new JobsRepository();
     const deduplicationEngine = new DeduplicationEngine(jobsRepo);
@@ -51,7 +87,15 @@ export default async function handler(
 
     // Step 1: Fetch jobs from all sources
     const { jobs, stats } = await jobFetcher.fetchAllJobs(since);
-    logger.info(`Fetched ${jobs.length} jobs total`, { stats });
+    logger.info(`Fetched ${jobs.length} jobs total`, { 
+      stats,
+      breakdown: Object.entries(stats).map(([source, s]) => ({
+        source,
+        fetched: s.fetched,
+        filtered: s.filtered,
+        errors: s.errors,
+      })),
+    });
 
     // Step 2: Deduplicate and store jobs
     const { stored, duplicates } = await deduplicationEngine.deduplicateAndStore(jobs);
@@ -109,6 +153,21 @@ export default async function handler(
           duplicates,
           notificationsSent: totalNotificationsSent,
           duration: `${duration}ms`,
+        },
+        sourceStats: stats,
+        config: {
+          enabledSources: {
+            remoteok: config.enableRemoteOK,
+            wwr: config.enableWWR,
+            wuzzuf: config.enableWuzzuf,
+          },
+          lookbackHours: config.jobFetchLookbackHours,
+          filters: {
+            queryKeywords: config.jobQueryKeywords.length > 0 ? config.jobQueryKeywords : 'none (all jobs allowed)',
+            excludedKeywords: config.jobExcludedKeywords.length > 0 ? config.jobExcludedKeywords : 'none',
+            locations: config.jobLocations.length > 0 ? config.jobLocations : 'none (all locations allowed)',
+            seniority: config.jobSeniority.length > 0 ? config.jobSeniority : 'none (all seniority levels allowed)',
+          },
         },
       });
     } finally {

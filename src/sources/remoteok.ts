@@ -82,7 +82,9 @@ export class RemoteOKSource implements JobSource {
       }
 
       logger.info(`Fetched ${normalizedJobs.length} jobs from ${this.name}`, {
-        totalJobs: jobs.length,
+        totalItems: data.length,
+        validJobs: jobs.length,
+        normalized: normalizedJobs.length,
         skippedBeforeSince,
         skippedInvalidDate,
         sinceDate: since.toISOString(),

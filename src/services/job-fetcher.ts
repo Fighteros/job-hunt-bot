@@ -43,12 +43,15 @@ export class JobFetcherService {
         // Filter jobs
         const filteredJobs = this.filter.filter(limitedJobs);
         sourceStats.filtered = filteredJobs.length;
+        const filteredOut = limitedJobs.length - filteredJobs.length;
 
         allJobs.push(...filteredJobs);
 
         logger.info(`Source ${source.name} completed`, {
           fetched: sourceStats.fetched,
+          afterLimit: limitedJobs.length,
           filtered: sourceStats.filtered,
+          filteredOut,
         });
       } catch (error) {
         sourceStats.errors = 1;

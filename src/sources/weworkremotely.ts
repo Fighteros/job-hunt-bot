@@ -29,11 +29,14 @@ export class WeWorkRemotelySource implements JobSource {
       logger.info(`RSS feed parsed, found ${feed.items?.length || 0} items`);
       
       const normalizedJobs: NormalizedJob[] = [];
+      let skippedBeforeSince = 0;
+      let skippedInvalid = 0;
 
       for (const item of feed.items || []) {
         try {
           if (!item.title || !item.link) {
-            logger.warn(`Skipping item with missing title or link`, { 
+            skippedInvalid++;
+            logger.debug(`Skipping item with missing title or link`, { 
               hasTitle: !!item.title,
               hasLink: !!item.link 
             });
@@ -44,12 +47,14 @@ export class WeWorkRemotelySource implements JobSource {
           
           // Validate date
           if (isNaN(postedAt.getTime())) {
-            logger.warn(`Invalid date for item: ${item.title}`, { pubDate: item.pubDate });
+            skippedInvalid++;
+            logger.debug(`Invalid date for item: ${item.title}`, { pubDate: item.pubDate });
             continue;
           }
           
           // Only include jobs posted after the 'since' date
           if (postedAt < since) {
+            skippedBeforeSince++;
             continue;
           }
 
@@ -96,7 +101,13 @@ export class WeWorkRemotelySource implements JobSource {
         }
       }
 
-      logger.info(`Fetched ${normalizedJobs.length} jobs from ${this.name} (from ${feed.items?.length || 0} total items)`);
+      logger.info(`Fetched ${normalizedJobs.length} jobs from ${this.name}`, {
+        totalItems: feed.items?.length || 0,
+        normalized: normalizedJobs.length,
+        skippedBeforeSince,
+        skippedInvalid,
+        sinceDate: since.toISOString(),
+      });
       return normalizedJobs;
     } catch (error) {
       logger.error(`Error fetching jobs from ${this.name}`, error);
