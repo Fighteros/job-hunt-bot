@@ -9,41 +9,35 @@ export function getPool(): Pool {
       throw new Error('DATABASE_URL environment variable is not set');
     }
 
-    // Determine SSL configuration
-    // For production environments (Vercel, etc.), always use SSL with rejectUnauthorized: false
-    // to handle self-signed certificates from managed database providers
+    // Detect if this is a Neon database connection
+    // Neon connection strings typically contain 'neon.tech' or 'neon' in the hostname
+    const isNeon = databaseUrl.includes('neon.tech') || databaseUrl.includes('@neon') || 
+                   databaseUrl.includes('neon-db') || databaseUrl.includes('neontech');
+    
+    // Detect production/serverless environments (Vercel, Lambda, etc.)
     const isProduction = 
       process.env.NODE_ENV === 'production' || 
       process.env.VERCEL === '1' ||
       process.env.VERCEL_ENV === 'production' ||
-      // Check if running on Vercel by looking for Vercel-specific env vars
-      !!process.env.VERCEL_URL;
+      !!process.env.VERCEL_URL ||
+      !!process.env.AWS_LAMBDA_FUNCTION_NAME;
     
-    // Parse connection string to check if SSL is required
+    // Configure SSL for Neon and other managed database providers
+    // Neon requires SSL and uses self-signed certificates, so we need rejectUnauthorized: false
     let sslConfig: boolean | { rejectUnauthorized: boolean } = false;
     
-    try {
-      const url = new URL(databaseUrl);
-      const sslMode = url.searchParams.get('sslmode');
-      
-      // If connection string explicitly disables SSL, respect that
-      if (sslMode === 'disable') {
-        sslConfig = false;
-      } else if (isProduction) {
-        // In production, always use SSL with rejectUnauthorized: false for self-signed certs
-        // This is necessary for managed database providers like Vercel Postgres, Neon, etc.
-        sslConfig = { rejectUnauthorized: false };
-      } else if (process.env.DATABASE_SSL === 'true' || sslMode === 'require' || sslMode === 'prefer') {
-        // In development, use SSL if explicitly enabled or if connection string requires it
-        sslConfig = { rejectUnauthorized: false };
-      }
-    } catch (e) {
-      // If URL parsing fails, fall back to simple logic
-      if (isProduction) {
-        sslConfig = { rejectUnauthorized: false };
-      } else if (process.env.DATABASE_SSL === 'true') {
-        sslConfig = { rejectUnauthorized: false };
-      }
+    // Check if SSL is explicitly disabled in connection string
+    const sslExplicitlyDisabled = databaseUrl.includes('sslmode=disable');
+    
+    if (sslExplicitlyDisabled) {
+      sslConfig = false;
+    } else if (isNeon || isProduction) {
+      // Neon and most managed DB providers (Vercel Postgres, Supabase, Railway, etc.)
+      // require SSL with rejectUnauthorized: false to handle self-signed certificates
+      sslConfig = { rejectUnauthorized: false };
+    } else if (process.env.DATABASE_SSL === 'true') {
+      // Development: use SSL if explicitly enabled
+      sslConfig = { rejectUnauthorized: false };
     }
 
     pool = new Pool({
