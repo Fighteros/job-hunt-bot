@@ -1,0 +1,14 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/daily-job-fetch",
+      "schedule": "0 9 * * *"
+    }
+  ],
+  "functions": {
+    "api/**/*.ts": {
+      "maxDuration": 30
+    }
+  }
+}
+
