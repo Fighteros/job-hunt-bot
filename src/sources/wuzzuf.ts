@@ -50,7 +50,7 @@ export class WuzzufSource implements JobSource {
         '.css-1gatmva-e1qvo2ff0',
       ];
       
-      let jobElements: cheerio.Cheerio<cheerio.Element> | null = null;
+      let jobElements: ReturnType<typeof $> | null = null;
       let usedSelector = '';
       
       for (const selector of jobSelectors) {
@@ -69,7 +69,7 @@ export class WuzzufSource implements JobSource {
         logger.warn(`No job containers found. Found ${jobLinks.length} potential job links. Trying alternative approach...`);
         
         // Try to find parent containers of job links
-        jobLinks.slice(0, 20).each((_idx: number, linkElement: cheerio.Element) => {
+        jobLinks.slice(0, 20).each((_idx: number, linkElement: any) => {
           try {
             const $link = $(linkElement);
             const $container = $link.closest('div, article, li');
@@ -119,7 +119,7 @@ export class WuzzufSource implements JobSource {
         });
       } else {
         // Use the found selector
-        jobElements.each((_idx: number, element: cheerio.Element) => {
+        jobElements.each((_idx: number, element: any) => {
           try {
             const $job = $(element);
             
